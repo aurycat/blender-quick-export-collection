@@ -1,0 +1,542 @@
+# MIT License
+#
+# Copyright (c) 2023 aurycat
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+# History:
+# 1.0 Initial release
+
+bl_info = {
+    "name": "Quick Export Collection",
+    "description": "Adds a 'Quick Export Collection' option to the context (right-click) menu of collections in the Outliner. The export settings can be configured per-collection with an ini-style config file named 'QuickExportCollectionConfig' in the in-Blender text editor (one will be created automatically when you first try to quick-export something).",
+    "author": "aurycat",
+    "version": (1, 0),
+    "blender": (4, 0, 0), # Minimum tested version. Might work with older.
+    "location": "Outliner > Collection Context Menu > Quick Export Collection",
+    "warning": "",
+    "doc_url": "",
+    "tracker_url": "https://gitlab.com/aurycat/blender-quick-export-collection",
+    "support": "COMMUNITY",
+    "category": "Import-Export",
+}
+
+import bpy
+import configparser
+from bpy.types import Operator
+from os.path import join as joinpath, normpath
+from io import StringIO
+
+CONFIG_FILE_NAME = "QuickExportCollectionConfig"
+
+TARGET_MENUS = [
+    # Context menu (aka right-click menu) for regular Collections in the outliner
+    bpy.types.OUTLINER_MT_collection,
+    # Context menu for the "Scene Collection" root in the outliner
+    bpy.types.OUTLINER_MT_collection_new
+]
+
+# List of exporters which are known to work correctly
+# The main rule is that they need a 'use_selection' property which
+# causes the exporter to only export selected objects
+EXPORTERS = {
+    'fbx': bpy.ops.export_scene.fbx
+}
+
+
+def main():
+    # Invoke unregister op on an existing "install" of the plugin before
+    # re-registering. Lets you press the "Run Script" button without having
+    # to maually unregister or run Blender > Reload Scripts first.
+    if ('quick_export_collection' in dir(bpy.ops)) and ('unregister' in dir(bpy.ops.quick_export_collection)):
+        bpy.ops.quick_export_collection.unregister()
+    register()
+
+
+def register():
+    bpy.utils.register_class(QXC_OT_export)
+    bpy.utils.register_class(QXC_OT_unregister)
+    for m in TARGET_MENUS:
+        m.prepend(qxc_draw_menu)
+
+
+def unregister():
+    for m in TARGET_MENUS:
+        m.remove(qxc_draw_menu)
+    bpy.utils.unregister_class(QXC_OT_export)
+    bpy.utils.unregister_class(QXC_OT_unregister)
+
+
+class QXC_OT_unregister(Operator):
+    bl_idname = "quick_export_collection.unregister"
+    bl_label = "Unregister"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        unregister()
+        return {'FINISHED'}
+
+
+def qxc_draw_menu(self, context):
+    layout = self.layout
+    
+    layout.operator(QXC_OT_export.bl_idname)
+    #layout.operator(QXC_OT_unregister.bl_idname)
+    layout.separator()
+
+
+def get_properties_for_op(op):
+    """ Get a list of all the properties (args) to a Blender operator,
+        skipping some that shouldn't be allowed to be configured in
+        the config file. """
+    prop_iter = op.get_rna_type().properties.items()
+    skip = ["rna_type", "filepath", "filter_glob", "use_active_collection", "use_selection", "batch_mode"]
+    return [(k,v) for k,v in prop_iter if k not in skip]
+
+EXPORTER_PROPERTIES = { k:get_properties_for_op(v) for k,v in EXPORTERS.items() }
+
+
+def set_excluded_collections(collection_names_not_allowing_export, collection_to_export, current_layercollection, within_collection_to_export=False):
+    """ The config file can mark collections as not allowed to be exported. This is useful
+        for utility collections which contain stuff that only needs to be in Blender.
+        Based on that list of unallowed collections, this function marks all collections
+        as 'excluded' or not exluded. To see how it works, consider this scene:
+
+          Collection A
+           - Object 1
+           - Collection B
+              - Object 2
+              - Collection C
+                 - Object 3
+
+        If A is being exported, and only B is not allowed to be exported, then only object 1 gets exported.
+        If B is being exported, and only C is not allowed to be exported, then only object 2 gets exported.
+        If B is being exported, and only A (!!) is not allowed to be exported, then objects 2 and 3 get
+          exported (even though A, containing B, is not allowed to be exported).
+        If C is being exported, object 3 always gets exported, regardless of whether A or B are allowed.
+        Of course, no collection can directly be exported if it is not allowed.
+
+        This behavior is sort-of the intuitive behavior you'd want when you right-click a collection
+        and select 'Export': child collections don't get exported if they're not allowed to be, but
+        it doesn't matter whether a parent collection is or isnt allowed to be exported.
+
+        To achieve this,
+          1. All collections outside `collection_to_export` are marked exclude=False.
+          2. `collection_to_export` is also marked exclude=False.
+          3. Collections inside `collection_to_export` are marked exclude=True if they are in the
+             not-allowed list, otherwise marked exclude=False.
+    """
+
+    if current_layercollection.collection == collection_to_export:
+        within_collection_to_export = True
+        current_layercollection.exclude = False
+
+    for c in current_layercollection.children:
+        if within_collection_to_export:
+            c.exclude = (c.name in collection_names_not_allowing_export)
+        else:
+            c.exclude = False
+        set_excluded_collections(collection_names_not_allowing_export, collection_to_export, c, within_collection_to_export)
+
+
+def find_topmost_collections(collection_names, collection):
+    """ Given a starting collection and a list of collection names,
+        find the topmost list of collections which contains all the
+        named collections. For example, if collection_names=["B","C","E"]
+        and the hierarchy is:
+          A
+            B
+              C
+              D
+            E
+        the output would be [B,E], since B and E include everything
+        listed in collection_names, and nothing outside of that. If
+        "A" was appended to that collection_names list, then the output
+        would be come [A].
+    """
+    if collection.name in collection_names:
+        return [collection]
+    list = []
+    for c in collection.children:
+        list.extend(find_topmost_collections(collection_names, c))
+    return list
+
+
+def select_included_objects_in_collection(view_layer, collection, mesh_only=False):
+    # Select set intersection between all the objects contained in
+    # the collection, and all the objects not excluded in the view layer.
+    bpy.ops.object.select_all(action = 'DESELECT')
+    objects_in_collection_to_export = collection.all_objects
+    unexcluded_objects = view_layer.objects
+    objects_to_export = set(objects_in_collection_to_export) & set(unexcluded_objects)
+    for o in objects_to_export:
+        if not mesh_only or o.type == 'MESH':
+            o.select_set(True)
+
+
+class QXC_OT_export(Operator):
+    bl_idname = "quick_export_collection.export"
+    bl_label = "Quick Export Collection"
+    bl_options = {"REGISTER"}
+    bl_description = "Export all objects in this collection"
+
+    def execute(self, context):
+        """ Export the active collection. Note that getting the collection that was
+            right-clicked on depends on the fact that Blender automatically makes it
+            the active collection as soon as the right-click menu opens.
+        """
+
+        collection_to_export = bpy.context.view_layer.active_layer_collection.collection
+        
+        print(f"=== Exporting collection '{collection_to_export.name}' ===")
+
+        s = self.get_export_settings(context, collection_to_export.name)
+        if s == None:
+            return {'CANCELLED'}
+        exporter_name, settings, collection_names_not_allowing_export, collection_names_requesting_join, collections_joined_mesh_names = s
+
+        export_func = EXPORTERS[exporter_name]
+
+        if 'use_selection' in EXPORTER_PROPERTIES[exporter_name]:
+            self.report({'ERROR'},
+f"Exporter '{exporter_name}' does not have a property 'use_selection' which " +
+"is required for Quick Export Collection to work. If this exporter has a different " +
+"name for a property of the same concept, or doesn't have that property at all, " +
+"you'll need to edit the code to account for it.")
+            return {'CANCELLED'}
+
+        # Ignore these values if set
+        settings.pop('use_active_collection', None)
+        settings.pop('use_selection', None)
+
+        print("Using settings:")
+        for k,v in settings.items():
+            if k not in ['use_active_collection', 'use_selection']:
+                vprint = repr(v).replace("\\\\", "\\")
+                print(f"  {k}={vprint}")
+
+        if 'check_existing' not in settings:
+            settings['check_existing'] = False
+
+        # Unfortunately, 'use_active_collection' will export objects in sub-collections
+        # even if they are marked excluded! So using only that filter, we can't enforce
+        # 'allow_export' for a collection. It could be combined with 'use_selection', but
+        # also not all exporters have a 'use_active_collection' option. Most have 'use_selection'
+        # though, so it's best to solely rely on selection as a means of deciding which
+        # objects to export.
+        if 'use_active_collection' in EXPORTER_PROPERTIES[exporter_name]:
+            settings['use_active_collection'] = False
+        settings['use_selection'] = True
+        
+        # A snag in that plan is the 'hide_select' option of objects and collections
+        # which disables them being selected. We need to temporarily disable that property
+        # on not only every object we want to export, so we can select it, but also on
+        # every collection containing those objects, since 'hide_select' applies recursively.
+        #
+        # Ideally disable_hide_select would only include collections that actually contain
+        # objects we want to export, but since there probably aren't many collections in a
+        # scene, it's easier/faster to just to include all the collections in the scene.
+        disable_hide_select = [o for o in collection_to_export.all_objects if o.hide_select]
+        disable_hide_select.extend([c for c in context.scene.collection.children_recursive if c.hide_select])
+
+        if len(collection_names_requesting_join) > 0:
+            collections_to_join = find_topmost_collections(collection_names_requesting_join, collection_to_export)
+        else:
+            collections_to_join = []
+        if len(collections_to_join) > 0:
+            print("Joining meshes for collections:")
+            for c in collections_to_join:
+                print(f"  {c.name} --> {collections_joined_mesh_names[c.name]}")
+
+        # Create a new view layer so we can modify excluded collections and selected
+        # objects and then easily restore those by just deleting the view layer and going
+        # back to the previous one
+        saved_view_layer = context.view_layer
+        bpy.ops.scene.view_layer_add(type='COPY')
+        new_view_layer = context.view_layer
+
+        # Sanity check
+        if new_view_layer == saved_view_layer:
+            raise RuntimeError("Failed to create a new temporary ViewLayer")
+
+        result = {'CANCELLED'}
+
+        try:
+            set_excluded_collections(collection_names_not_allowing_export, collection_to_export, new_view_layer.layer_collection)
+
+            try:
+                for oc in disable_hide_select:
+                    oc.hide_select = False
+
+                joined_meshes = []
+                duplicated_meshes = []
+                abort_postjoin_meshes = []
+                try:
+                    # Create joined versions of meshes in collections that were requested to be joined
+                    for c in collections_to_join:
+                        select_included_objects_in_collection(new_view_layer, c, mesh_only=True)
+                        if len(context.selected_objects) > 1:
+                            if bpy.ops.object.duplicate(linked=False) != {'FINISHED'}:
+                                raise RuntimeError(f"Failed to duplicate meshes (as part of making a joined mesh) in collection {c.name}. Selected objects are: {repr(context.selected_objects)}")
+                            duplicated_meshes = context.selected_objects.copy()
+        
+                            # Make sure the active object is among the selected
+                            # objects otherwise join() is unhappy
+                            context.view_layer.objects.active = context.selected_objects[0]
+
+                            if bpy.ops.object.join() != {'FINISHED'}:
+                                raise RuntimeError(f"Failed to join meshes in collection {c.name}. Selected objects are: {repr(context.selected_objects)}")
+
+                            if len(context.selected_objects) != 1:
+                                abort_postjoin_meshes = context.selected_objects.copy()
+                                raise RuntimeError(f"After join, more than one object is selected! When joining meshes in collection {c.name}. Selected objects are: {repr(context.selected_objects)}")
+
+                            new_joined_mesh = context.selected_objects[0]
+                            new_joined_mesh.name = collections_joined_mesh_names[c.name]
+                            new_joined_mesh.data.name = new_joined_mesh.name
+
+                            if new_joined_mesh in joined_meshes:
+                                raise RuntimeError(f"Duplicate in joined meshes list! When joining meshes in collection {c.name}. Duplicate object is: {repr(context.selected_objects)}")
+
+                            joined_meshes.append(new_joined_mesh)
+                            duplicated_meshes = []
+                    
+                    # Select all objects to export.
+                    # If joined meshes are involved, this first selection will include both
+                    # the original separate meshes *and* the joined meshes! That will be
+                    # resolved in the next step
+                    select_included_objects_in_collection(new_view_layer, collection_to_export)
+
+                    # Unselect everything from joined collections...
+                    for c in collections_to_join:
+                        for o in c.all_objects:
+                            if o.type == 'MESH':
+                                o.select_set(False)
+                    
+                    # And now re-select only the joined meshes
+                    for o in joined_meshes:
+                        o.select_set(True)
+
+                    # At last! Do the actual export! Woooo
+                    result = export_func(**settings)
+                    
+                    if result == {'FINISHED'}:
+                        self.report({'INFO'}, f"Successfully exported {collection_to_export.name} to {settings['filepath']}")
+
+                finally:
+                    # Remove any objects created by the mesh joining process
+                    # If the object was already removed, calling remove (or any access of m) will
+                    # raise a ReferenceError. It doesn't matter, just clean up everything we made.
+                    for m in joined_meshes:
+                        try: bpy.data.objects.remove(m)
+                        except: pass
+                    for m in duplicated_meshes:
+                        try: bpy.data.objects.remove(m)
+                        except: pass
+                    for m in abort_postjoin_meshes:
+                        try: bpy.data.objects.remove(m)
+                        except: pass
+            finally:
+                # Restore objects/collections with disabled hide_select
+                for oc in disable_hide_select:
+                    try: oc.hide_select = True
+                    except: pass
+        finally:
+            # Restore previous view layer, which restores selection and excluded collections
+            context.window.view_layer = saved_view_layer
+            # Delete temporary view layer
+            context.scene.view_layers.remove(new_view_layer)
+
+        return result
+
+    def get_export_settings(self, context, collection_name):
+        """ Get all the info from the config file necessary to export a particular collection.
+            Will create the config file or config section if not available.
+            Also returns some general info about all collections from the config file which is
+            necessary for exporting the desired collection.
+        """
+        global EXPORTERS, EXPORTER_PROPERTIES, CONFIG_FILE_NAME
+
+        config = configparser.ConfigParser()
+        no_conf_file = False
+        no_conf_section = False
+        changed = False
+
+        try:
+            txt = bpy.data.texts[CONFIG_FILE_NAME].as_string()
+            config.read_string(txt)
+        except KeyError:
+            no_conf_file = True
+            changed = True
+
+        if not config.has_section(collection_name):
+            config.add_section(collection_name)
+            no_conf_section = True
+            changed = True
+
+        ok = not (no_conf_file or no_conf_section)
+
+        default = config.defaults()
+        # Note that accessing something in col_config will return the value
+        # from defaults() if its not set directly in the col_config section.
+        col_config = config[collection_name]
+
+        if not col_config.getboolean('allow_export', fallback=True):
+            self.report({'ERROR'}, f"Export is disallowed for '{collection_name}'.")
+            return None
+
+        if 'exporter' not in col_config:
+            default['exporter'] = "fbx"
+            changed = True
+            if ok:
+                self.report({'WARNING'}, f"Exporter not set in config; setting default exporter to fbx.")
+        exporter_name = col_config['exporter']
+
+        if exporter_name not in EXPORTERS:
+            self.report({'ERROR'}, f"Unknown/unsupported exporter '{exporter_name}' on collection '{collection_name}'.")
+            return None
+
+        if 'name' not in col_config:
+            col_config['name'] = f"{collection_name}.{exporter_name}"
+            changed = True
+            if ok:
+                self.report({'WARNING'}, f"Export name for collection '{collection_name}' was not configured; setting an automatic name.")
+        export_name = col_config['name']
+
+        if 'directory' not in col_config:
+            default['directory'] = "//"
+            changed = True
+            if ok:
+                self.report({'WARNING'}, f"Export directory was not configured; setting default directory to current working directory.")
+        export_dir = col_config['directory']
+
+        if export_dir[:2] == "./" or export_dir[:2] == ".\\":
+            self.report({'WARNING'},
+f"Export directory starts with \"{export_dir[:2]}\", but in Blender the way to refer " +
+"to a path relative to the blend file is with the prefix \"//\". Using that instead.")
+            export_dir = "//" + export_dir[2:]
+        elif export_dir == ".":
+            self.report({'WARNING'},
+f"Export directory is \".\", but in Blender the way to refer to a path relative " +
+"to the blend file is with \"//\". Using that instead.")
+            export_dir = "//"
+
+        if changed:
+            if CONFIG_FILE_NAME not in bpy.data.texts:
+                bpy.data.texts.new(CONFIG_FILE_NAME)
+            with StringIO() as ss:
+                config.write(ss)
+                ss.seek(0)
+                bpy.data.texts[CONFIG_FILE_NAME].from_string(ss.read())
+
+        if no_conf_file:
+            self.report({'ERROR'},
+f"No {CONFIG_FILE_NAME} file was present, so one has been " +
+"created automatically. Go to the Text Edtior window to see and " +
+"review it, make changes as necessary, then export again.")
+            return None
+
+        if no_conf_section:
+            self.report({'ERROR'},
+"No config for this collection was found. A default config has been " +
+f"written to {CONFIG_FILE_NAME}. Go to the Text Editor window " +
+"to see and review it, make changes as necessary, then export again.")
+            return None
+
+        if not bpy.data.is_saved and export_dir[:2] == '//':
+            self.report({'ERROR'}, "Export path is relative to blend file, but the blend file is not saved. Please save first.")
+            return None
+
+        args = self.get_exporter_args_from_config(exporter_name, col_config)
+        if args == None:
+            return None
+
+        collections_not_allowing_export = []
+        collections_requesting_join = []
+        collections_joined_mesh_names = {}
+        for collection_name in config.sections():
+            if not config.getboolean(collection_name, 'allow_export', fallback=True):
+                collections_not_allowing_export.append(collection_name)
+
+            if config.getboolean(collection_name, 'join_meshes', fallback=False):
+                collections_requesting_join.append(collection_name)
+                collections_joined_mesh_names[collection_name] = config.get(collection_name, 'joined_mesh_name', fallback=collection_name)
+
+        export_name = export_name.replace("/", "_").replace("\\", "_")
+        export_name = bpy.path.ensure_ext(export_name, "." + exporter_name)
+        export_dir = normpath(bpy.path.native_pathsep(bpy.path.abspath(export_dir)))
+        args['filepath'] = joinpath(export_dir, export_name)
+
+        return (exporter_name, args, collections_not_allowing_export, collections_requesting_join, collections_joined_mesh_names)
+
+
+    def get_exporter_args_from_config(self, exporter, config_section):
+        """ For the current exporter (e.g. fbx) look at all the properties/settings/options
+            it accepts, and see if there is an entry in the config file for it. If so, validate
+            it to make sure its the correct type or in the allowed set of enum options.
+            Returns a dictionary that is ready to be passed to the exporter operator function
+            via **args.
+        """
+        args = {}
+        for prop_name, prop in EXPORTER_PROPERTIES[exporter]:
+            ty = type(prop)
+            if ty == bpy.types.BoolProperty:
+                try:
+                    val = config_section.getboolean(prop_name)
+                except ValueError:
+                    self.report({'ERROR'}, f"Invalid value for config property '{prop_name}', should be a boolean")
+                    return None
+            elif ty == bpy.types.StringProperty:
+                val = config_section.get(prop_name)
+            elif ty == bpy.types.FloatProperty:
+                try:
+                    val = config_section.getfloat(prop_name)
+                except ValueError:
+                    self.report({'ERROR'}, f"Invalid value for config property '{prop_name}', should be a number")
+                    return None
+            elif ty == bpy.types.IntProperty:
+                try:
+                    val = config_section.getint(prop_name)
+                except ValueError:
+                    self.report({'ERROR'}, f"Invalid value for config property '{prop_name}', should be an integer (whole number)")
+                    return None
+            elif ty == bpy.types.EnumProperty:
+                val = config_section.get(prop_name)
+                if val != None:
+                    options = set([i.identifier for i in prop.enum_items])
+                    if prop.is_enum_flag:
+                        # enum set
+                        val = set(val.split(','))
+                        for v in val:
+                            if v not in options:
+                                self.report({'ERROR'}, f"Invalid value for config property '{prop_name}', should be a comma-separated list out of {options}")
+                                return None
+                    else:
+                        # enum single-selection
+                        if val not in options:
+                            self.report({'ERROR'}, f"Invalid value for config property '{prop_name}', should be one of {options}")
+                            return None
+
+            if val != None:
+                args[prop_name] = val
+        return args
+
+
+if __name__ == "__main__":
+    main()
