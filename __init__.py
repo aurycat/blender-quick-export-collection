@@ -40,7 +40,7 @@ bl_info = {
 import bpy
 import configparser
 from bpy.types import Operator
-from os.path import join as joinpath, normpath
+from os.path import join as joinpath, normpath, isdir
 from io import StringIO
 
 CONFIG_FILE_NAME = "QuickExportCollectionConfig"
@@ -215,10 +215,10 @@ class QXC_OT_export(Operator):
 
         if 'use_selection' in EXPORTER_PROPERTIES[exporter_name]:
             self.report({'ERROR'},
-f"Exporter '{exporter_name}' does not have a property 'use_selection' which " +
-"is required for Quick Export Collection to work. If this exporter has a different " +
-"name for a property of the same concept, or doesn't have that property at all, " +
-"you'll need to edit the code to account for it.")
+f"Exporter '{exporter_name}' does not have a property 'use_selection' which \
+is required for Quick Export Collection to work. If this exporter has a different \
+name for a property of the same concept, or doesn't have that property at all, \
+you'll need to edit the code to account for it.")
             return {'CANCELLED'}
 
         # Ignore these values if set
@@ -374,93 +374,84 @@ f"Exporter '{exporter_name}' does not have a property 'use_selection' which " +
         global EXPORTERS, EXPORTER_PROPERTIES, CONFIG_FILE_NAME
 
         config = configparser.ConfigParser()
-        no_conf_file = False
-        no_conf_section = False
-        changed = False
+        create_conf_file = False
+        append_section = False
 
-        try:
+        if CONFIG_FILE_NAME in bpy.data.texts:
             txt = bpy.data.texts[CONFIG_FILE_NAME].as_string()
-            config.read_string(txt)
-        except KeyError:
-            no_conf_file = True
-            changed = True
+            if txt == "" or txt.isspace():
+                create_conf_file = True
+            else:
+                config.read_string(txt)
+        else:
+            create_conf_file = True
 
         if not config.has_section(collection_name):
             config.add_section(collection_name)
-            no_conf_section = True
-            changed = True
+            append_section = True
 
-        ok = not (no_conf_file or no_conf_section)
+        create = (create_conf_file or append_section)
 
         default = config.defaults()
         # Note that accessing something in col_config will return the value
         # from defaults() if its not set directly in the col_config section.
         col_config = config[collection_name]
 
-        if not col_config.getboolean('allow_export', fallback=True):
-            self.report({'ERROR'}, f"Export is disallowed for '{collection_name}'.")
+        if col_config.getboolean('prevent_export', fallback=False):
+            self.report({'ERROR'},
+f"Export is disallowed for '{collection_name}'. (That can be changed in the config \
+file {CONFIG_FILE_NAME}, which is found in the Text Edtior window.)")
             return None
 
-        if 'exporter' not in col_config:
-            default['exporter'] = "fbx"
-            changed = True
-            if ok:
-                self.report({'WARNING'}, f"Exporter not set in config; setting default exporter to fbx.")
-        exporter_name = col_config['exporter']
+        exporter_name = col_config.get('exporter', fallback="fbx")
 
         if exporter_name not in EXPORTERS:
-            self.report({'ERROR'}, f"Unknown/unsupported exporter '{exporter_name}' on collection '{collection_name}'.")
+            self.report({'ERROR'},
+f"Unknown/unsupported exporter '{exporter_name}' for collection '{collection_name}'. \
+Please adjust it in the config file {CONFIG_FILE_NAME}, which is found in the \
+Text Edtior window.")
             return None
 
-        if 'name' not in col_config:
-            col_config['name'] = f"{collection_name}.{exporter_name}"
-            changed = True
-            if ok:
-                self.report({'WARNING'}, f"Export name for collection '{collection_name}' was not configured; setting an automatic name.")
-        export_name = col_config['name']
+        export_filename = col_config.get('filename', fallback=f"{collection_name}.{exporter_name}")
 
-        if 'directory' not in col_config:
-            default['directory'] = "//"
-            changed = True
-            if ok:
-                self.report({'WARNING'}, f"Export directory was not configured; setting default directory to current working directory.")
-        export_dir = col_config['directory']
+        export_dir = col_config.get('directory', fallback="//")
 
         if export_dir[:2] == "./" or export_dir[:2] == ".\\":
             self.report({'WARNING'},
-f"Export directory starts with \"{export_dir[:2]}\", but in Blender the way to refer " +
-"to a path relative to the blend file is with the prefix \"//\". Using that instead.")
+f"Export directory starts with \"{export_dir[:2]}\", but in Blender the way to refer \
+to a path relative to the blend file is with the prefix \"//\". Using that instead.")
             export_dir = "//" + export_dir[2:]
         elif export_dir == ".":
             self.report({'WARNING'},
-f"Export directory is \".\", but in Blender the way to refer to a path relative " +
-"to the blend file is with \"//\". Using that instead.")
+f"Export directory is \".\", but in Blender the way to refer to a path relative \
+to the blend file is with \"//\". Using that instead.")
             export_dir = "//"
 
-        if changed:
-            if CONFIG_FILE_NAME not in bpy.data.texts:
-                bpy.data.texts.new(CONFIG_FILE_NAME)
-            with StringIO() as ss:
-                config.write(ss)
-                ss.seek(0)
-                bpy.data.texts[CONFIG_FILE_NAME].from_string(ss.read())
-
-        if no_conf_file:
+        if create_conf_file:
+            self.make_new_config_file(collection_name, export_filename)
             self.report({'ERROR'},
-f"No {CONFIG_FILE_NAME} file was present, so one has been " +
-"created automatically. Go to the Text Edtior window to see and " +
-"review it, make changes as necessary, then export again.")
+f"[FIRST EXPORT NOTICE!] No config file was present, so one has been created \
+automatically. Go to the Text Edtior window and open {CONFIG_FILE_NAME} \
+to review it, make changes as necessary, then try exporting again.")
             return None
-
-        if no_conf_section:
+        elif append_section:
+            self.append_new_section_to_config_file(collection_name, export_filename)
             self.report({'ERROR'},
-"No config for this collection was found. A default config has been " +
-f"written to {CONFIG_FILE_NAME}. Go to the Text Editor window " +
-"to see and review it, make changes as necessary, then export again.")
+f"[FIRST EXPORT NOTICE!] This collection is not listed in the exporter config \
+file. A new section for '{collection_name}' has been created automatically. \
+Go to the Text Edtior window and open {CONFIG_FILE_NAME} to review it, make \
+changes as necessary, then try exporting again.")
             return None
 
         if not bpy.data.is_saved and export_dir[:2] == '//':
-            self.report({'ERROR'}, "Export path is relative to blend file, but the blend file is not saved. Please save first.")
+            self.report({'ERROR'},
+f"Export directory '{export_dir}' is relative to blend file, but the blend \
+file is not saved. Please save first.")
+            return None
+
+        export_dir = normpath(bpy.path.native_pathsep(bpy.path.abspath(export_dir)))
+        if not isdir(export_dir):
+            self.report({'ERROR'}, f"Export directory '{export_dir}' does not exist.")
             return None
 
         args = self.get_exporter_args_from_config(exporter_name, col_config)
@@ -471,19 +462,76 @@ f"written to {CONFIG_FILE_NAME}. Go to the Text Editor window " +
         collections_requesting_join = []
         collections_joined_mesh_names = {}
         for collection_name in config.sections():
-            if not config.getboolean(collection_name, 'allow_export', fallback=True):
+            if not config.getboolean(collection_name, 'prevent_export', fallback=True):
                 collections_not_allowing_export.append(collection_name)
 
             if config.getboolean(collection_name, 'join_meshes', fallback=False):
                 collections_requesting_join.append(collection_name)
                 collections_joined_mesh_names[collection_name] = config.get(collection_name, 'joined_mesh_name', fallback=collection_name)
 
-        export_name = export_name.replace("/", "_").replace("\\", "_")
-        export_name = bpy.path.ensure_ext(export_name, "." + exporter_name)
-        export_dir = normpath(bpy.path.native_pathsep(bpy.path.abspath(export_dir)))
-        args['filepath'] = joinpath(export_dir, export_name)
+        export_filename = bpy.path.ensure_ext(export_filename, f".{exporter_name}")
+        t = str.maketrans("\\/:*?\"'<>|", "__________")
+        export_filename = export_filename.translate(t)
+
+        args['filepath'] = joinpath(export_dir, export_filename)
 
         return (exporter_name, args, collections_not_allowing_export, collections_requesting_join, collections_joined_mesh_names)
+
+
+    def make_new_config_file(self, collection_name, filename):
+        text = f"""\
+# Settings file for Quick Export Collection addon.
+#
+# Each [section] header below indicates configuration for one Collection.
+# The [DEFAULT] section is special; it provides defaults for any options
+# not specified in another section.
+#
+# The supported options are:
+#   exporter         - Which model format to export with. Can be changed
+#                      per-collection but usually goes in [DEFAULT].
+#                      Currently the only supported exporter is 'fbx'.
+#   directory        - The location files are exported to. Usually goes in
+#                      the [DEFAULT] section. Start the path with // to
+#                      indicate a path relative to this .blend file. Example:
+#                        directory = //../Assets/Models
+#                      If unspecified, the default is // .
+#   filename         - The output filename. If no extension is specified, the
+#                      default extension for the exporter (eg. '.fbx') is used.
+#                      If unspecified, the collection's name is used.
+#   prevent_export   - If set to True, the collection cannot be exported,
+#                      and it will not be included included when exporting
+#                      a parent collection.
+#   join_meshes      - If set to True, all meshes in this collection will be
+#                      merged/joined into one during export. It even applies
+#                      when exported as a sub-collection of another export.
+#   joined_mesh_name - When join_meshes is True, this specifies the name of
+#                      the combined mesh in the export. If not specified, the
+#                      name of the collection is used.
+# Additionally, any options supported by the exporter can be specified.
+# For example, the fbx exporter supports the options 'object_types',
+# 'use_triangles', 'embed_textures', and more."
+
+[DEFAULT]
+exporter = fbx
+directory = //
+
+[{collection_name}]
+filename = {filename}
+"""
+        if CONFIG_FILE_NAME not in bpy.data.texts:
+            bpy.data.texts.new(CONFIG_FILE_NAME)
+        bpy.data.texts[CONFIG_FILE_NAME].from_string(text)
+
+
+    def append_new_section_to_config_file(self, collection_name, filename):
+        text = bpy.data.texts[CONFIG_FILE_NAME].as_string()
+        if text[-1:] != "\n":
+            text += "\n"
+        text += f"""\n\
+[{collection_name}]
+filename = {filename}
+"""
+        bpy.data.texts[CONFIG_FILE_NAME].from_string(text)
 
 
     def get_exporter_args_from_config(self, exporter, config_section):
