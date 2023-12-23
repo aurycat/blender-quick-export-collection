@@ -202,7 +202,14 @@ class QXC_OT_export(Operator):
             the active collection as soon as the right-click menu opens.
         """
 
-        collection_to_export = bpy.context.view_layer.active_layer_collection.collection
+        target_obj = context.id
+        # Scene collection appears as the Scene object, not its collection
+        if isinstance(target_obj, bpy.types.Scene):
+            target_obj = target_obj.collection
+        if not isinstance(target_obj, bpy.types.Collection):
+            raise RuntimeError(f"Target object is not a collection: {target_obj}")
+
+        collection_to_export = target_obj
         
         print(f"=== Exporting collection '{collection_to_export.name}' ===")
 
