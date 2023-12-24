@@ -114,59 +114,70 @@ def get_properties_for_op(op):
 EXPORTER_PROPERTIES = { k:get_properties_for_op(v) for k,v in EXPORTERS.items() }
 
 
-def enumerate_layercollections(lc, _internal_output={}):
-    """ As far as I can tell, Blender doesn't have an easy-to-access list of all
-        LayerCollections, you just have to recurse through them.
-        down. Pass view_layer.layer_collection as the initial `lc`. Returns a dict
-        of LayerCollections, akin to `bpy.data.collections`.
+#def map_layercollections(lc, _internal_output={}):
+#    _internal_output[lc.name] = lc
+#    for clc in lc.children:
+#        enumerate_layercollections(clc, _internal_output)
+#    return _internal_output
+
+
+def list_layercollections(lc, collection_to_export, output=None, within_collection_to_export=False):
+    """ I couldn't find any API like bpy.data.collections for LayerCollections,
+        so enumerate them manually. Also check which ones are children of the
+        collection to export. Don't include root LayerCollection because it behaves
+        weirdly in regard to the `exclude` property.
     """
-    _internal_output[lc.name] = lc
-    for clc in lc.children:
-        enumerate_layercollections(clc, _internal_output)
-    return _internal_output
-
-
-def set_excluded_collections(collection_names_not_allowing_export, collection_to_export, current_layercollection, within_collection_to_export=False, top=True):
-    """ The config file can mark collections as not allowed to be exported. This is useful
-        for utility collections which contain stuff that only needs to be in Blender.
-        Based on that list of unallowed collections, this function marks all collections
-        as 'excluded' or not exluded. To see how it works, consider this scene:
-
-          Collection A
-           - Object 1
-           - Collection B
-              - Object 2
-              - Collection C
-                 - Object 3
-
-        If A is being exported, and only B is not allowed to be exported, then only object 1 gets exported.
-        If B is being exported, and only C is not allowed to be exported, then only object 2 gets exported.
-        If B is being exported, and only A (!!) is not allowed to be exported, then objects 2 and 3 get
-          exported (even though A, containing B, is not allowed to be exported).
-        If C is being exported, object 3 always gets exported, regardless of whether A or B are allowed.
-        Of course, no collection can directly be exported if it is not allowed.
-
-        This behavior is sort-of the intuitive behavior you'd want when you right-click a collection
-        and select 'Export': child collections don't get exported if they're not allowed to be, but
-        it doesn't matter whether a parent collection is or isnt allowed to be exported.
-
-        To achieve this,
-          1. All collections outside `collection_to_export` are marked exclude=False.
-          2. `collection_to_export` is also marked exclude=False.
-          3. Collections inside `collection_to_export` are marked exclude=True if they are in the
-             not-allowed list, otherwise marked exclude=False.
-    """
-
-    if current_layercollection.collection == collection_to_export:
+    if output == None: # https://stackoverflow.com/q/1132941
+        output = []
+    if lc.collection == collection_to_export:
         within_collection_to_export = True
-        current_layercollection.exclude = False
+    for clc in lc.children:
+        output.append((clc, within_collection_to_export))
+        list_layercollections(clc, collection_to_export, output, within_collection_to_export)
+    return output
 
-    for c in current_layercollection.children:
-        if within_collection_to_export:
-            c.exclude = (c.name in collection_names_not_allowing_export)
-        else:
-            c.exclude = True
-        set_excluded_collections(collection_names_not_allowing_export, collection_to_export, c, within_collection_to_export, top=False)
+
+#def set_excluded_collections(collection_names_not_exportable, collection_to_export, current_layercollection, within_collection_to_export=False, top=True):
+#    """ The config file can mark collections as not allowed to be exported. This is useful
+#        for utility collections which contain stuff that only needs to be in Blender.
+#        Based on that list of unallowed collections, this function marks all collections
+#        as 'excluded' or not exluded. To see how it works, consider this scene:
+
+#          Collection A
+#           - Object 1
+#           - Collection B
+#              - Object 2
+#              - Collection C
+#                 - Object 3
+
+#        If A is being exported, and only B is not allowed to be exported, then only object 1 gets exported.
+#        If B is being exported, and only C is not allowed to be exported, then only object 2 gets exported.
+#        If B is being exported, and only A (!!) is not allowed to be exported, then objects 2 and 3 get
+#          exported (even though A, containing B, is not allowed to be exported).
+#        If C is being exported, object 3 always gets exported, regardless of whether A or B are allowed.
+#        Of course, no collection can directly be exported if it is not allowed.
+
+#        This behavior is sort-of the intuitive behavior you'd want when you right-click a collection
+#        and select 'Export': child collections don't get exported if they're not allowed to be, but
+#        it doesn't matter whether a parent collection is or isnt allowed to be exported.
+
+#        To achieve this,
+#          1. All collections outside `collection_to_export` are marked exclude=False.
+#          2. `collection_to_export` is also marked exclude=False.
+#          3. Collections inside `collection_to_export` are marked exclude=True if they are in the
+#             not-allowed list, otherwise marked exclude=False.
+#    """
+
+#    if current_layercollection.collection == collection_to_export:
+#        within_collection_to_export = True
+#        current_layercollection.exclude = False
+
+#    for c in current_layercollection.children:
+#        if within_collection_to_export:
+#            c.exclude = (c.name in collection_names_not_exportable)
+#        else:
+#            c.exclude = True
+#        set_excluded_collections(collection_names_not_exportable, collection_to_export, c, within_collection_to_export, top=False)
 
 
 def find_topmost_collections(collection_names, collection):
@@ -230,7 +241,7 @@ class QXC_OT_export(Operator):
         s = self.get_export_settings(context, collection_to_export.name)
         if s == None:
             return {'CANCELLED'}
-        exporter_name, settings, collection_names_not_allowing_export, collection_names_requesting_join, collections_joined_mesh_names = s
+        exporter_name, settings, collection_names_not_exportable, collection_names_requesting_join, collection_joined_mesh_names = s
 
         export_func = EXPORTERS[exporter_name]
 
@@ -283,7 +294,7 @@ you'll need to edit the code to account for it.")
         if len(collections_to_join) > 0:
             print("Joining meshes for collections:")
             for c in collections_to_join:
-                print(f"  {c.name} --> {collections_joined_mesh_names[c.name]}")
+                print(f"  {c.name} --> {collection_joined_mesh_names[c.name]}")
 
         result = {'CANCELLED'}
 
@@ -300,48 +311,48 @@ you'll need to edit the code to account for it.")
 
         # Enter block which restores the previous view layer on exit
         try:
-            # A LayerCollection is a wrapper around a Collection with extra info specific to
-            # the view layer the LayerCollection is in. In particular, it holds the "exclude"
-            # property, which determines whether objects in the collection can be selected
-            # and whether objects appear in the `viewlayer.objects` list.
-            layercollections = {}
-            enumerate_layercollections(layercollections, new_view_layer.layer_collection, collection_to_export)
+            # A LayerCollection is a wrapper around a Collection with extra info specific to the
+            # view layer. In particular, it holds the `exclude` property (seen as the checkbox
+            # next to collections in the Outliner), which determines whether objects in the 
+            # collection can be selected and whether objects appear in `viewlayer.objects`.
+            layercollections = list_layercollections(bpy.context.view_layer.layer_collection, collection_to_export)
 
             if DEBUG_PRINTS:
                 print(f"[DEBUG] Marking excluded collections:")
+                # Due to recursive effect noted below, need to store all the exclude values
+                # before modifying in order for the before/after debug print to be correct
+                prev_excludes = [lc.exclude for lc, _ in layercollections]
 
-            # For LayerCollections outside the collection to export, mark them NOT excluded.
-            # The reason is that if the collection to export is a child of some outer collection,
-            # we don't want the outer collection to be excluded otherwise nothing in our
-            # collection to export will be selectable.
+            # For LayerCollections outside the collection to export (CTE), mark them *not*
+            # excluded. Because if the CTE is a child collection, we don't want the outer
+            # collection to be excluded otherwise nothing in our CTE will be selectable.
             #
-            # Otherwise, for LayerCollections within the collection to export, we can
-            # exclude them based on whether it marked in the config file as not allowed to
-            # be exported. That will prevent objects within from being selected for export
-            # during the next steps.
-            for lc, within_collection_to_export in layercollections.items():
-                prev_include = not lc.exclude
-
-                if lc == new_view_layer.layer_collection:
-                    # The toplevel scene LayerCollection will always be included,
-                    # and trying to set lc.exclude=False on it causes every other
-                    # LayerCollection to become unexcluded. I'm not sure if that
-                    # is a bug or a feature.
-                    pass
+            # Otherwise, within the CTE, exclude them based on whether it is marked in the
+            # config file as not allowed to be exported. That will prevent objects within
+            # from being selected for export during the next steps.
+            #
+            # Also notable: modifying `exclude` recursively affects child LayerCollections.
+            #  - Changing to True will recursively exclude all child LayerCollections and
+            #    internally (unreachable by Python) remember their previous excluded state.
+            #  - Changing to False will recursively restore all child LayerCollections
+            #    to their saved state.
+            # This is a little annoying, but we can avoid any issues by making sure to
+            # always set `exclude` starting from the outermost collections, going inwards.
+            for lc, within_collection_to_export in layercollections:
+                if within_collection_to_export:
+                    lc.exclude = (lc.name in collection_names_not_exportable)
                 else:
-                    if within_collection_to_export:
-                        lc.exclude = (lc.name in collection_names_not_allowing_export)
-                    else:
-                        lc.exclude = False # Yes, False! See comment above.
+                    lc.exclude = False # Yes, False! See comment above.
 
-                if DEBUG_PRINTS:
+            if DEBUG_PRINTS:
+                for i, (lc, within_collection_to_export) in enumerate(layercollections):
                     w_tick = "w" if within_collection_to_export else " "
-                    # Use included instead of excluded since its easier to think about
-                    pi_tick = "i" if prev_include else " "
-                    ni_tick = "I" if not lc.exclude else " "
-                    print(f"  [{w_tick}{pi_tick}{ni_tick}] {lc.name}")
+                    pe_tick = "e" if prev_excludes[i] else "I"
+                    ne_tick = "e" if lc.exclude else "I"
+                    print(f"  [{w_tick}{pe_tick}{ne_tick}] {lc.name}")
 
-        
+            return result
+
             # Enter block which restores the previous hide_select state on exit
             try:
                 for oc in disable_hide_select:
@@ -383,7 +394,7 @@ you'll need to edit the code to account for it.")
                                 raise RuntimeError(f"After join, more than one object is selected! When joining meshes in collection {c.name}. Selected objects are: {repr(context.selected_objects)}")
 
                             new_joined_mesh = context.selected_objects[0]
-                            new_joined_mesh.name = collections_joined_mesh_names[c.name]
+                            new_joined_mesh.name = collection_joined_mesh_names[c.name]
                             new_joined_mesh.data.name = new_joined_mesh.name
 
                             if new_joined_mesh in joined_meshes:
@@ -512,10 +523,10 @@ you'll need to edit the code to account for it.")
         # from defaults() if its not set directly in the col_config section.
         col_config = config[collection_name]
 
-        if col_config.getboolean('prevent_export', fallback=False):
+        if not col_config.getboolean('exportable', fallback=True):
             self.report({'ERROR'},
-f"Export is disallowed for '{collection_name}'. (That can be changed in the config \
-file {CONFIG_FILE_NAME}, which is found in the Text Edtior window.)")
+f"'{collection_name}' is marked unexportable in config. (The config \
+file {CONFIG_FILE_NAME} can be found in the Text Edtior window.)")
             return None
 
         exporter_name = col_config.get('exporter', fallback="fbx")
@@ -573,16 +584,16 @@ file is not saved. Please save first.")
         if args == None:
             return None
 
-        collections_not_allowing_export = []
-        collections_requesting_join = []
-        collections_joined_mesh_names = {}
+        collection_names_not_exportable = []
+        collection_names_requesting_join = []
+        collection_joined_mesh_names = {}
         for collection_name in config.sections():
-            if not config.getboolean(collection_name, 'prevent_export', fallback=True):
-                collections_not_allowing_export.append(collection_name)
+            if not config.getboolean(collection_name, 'exportable', fallback=True):
+                collection_names_not_exportable.append(collection_name)
 
             if config.getboolean(collection_name, 'join_meshes', fallback=False):
-                collections_requesting_join.append(collection_name)
-                collections_joined_mesh_names[collection_name] = config.get(collection_name, 'joined_mesh_name', fallback=collection_name)
+                collection_names_requesting_join.append(collection_name)
+                collection_joined_mesh_names[collection_name] = config.get(collection_name, 'joined_mesh_name', fallback=collection_name)
 
         export_filename = bpy.path.ensure_ext(export_filename, f".{exporter_name}")
         t = str.maketrans("\\/:*?\"'<>|", "__________")
@@ -590,7 +601,7 @@ file is not saved. Please save first.")
 
         args['filepath'] = joinpath(export_dir, export_filename)
 
-        return (exporter_name, args, collections_not_allowing_export, collections_requesting_join, collections_joined_mesh_names)
+        return (exporter_name, args, collection_names_not_exportable, collection_names_requesting_join, collection_joined_mesh_names)
 
 
     def make_new_config_file(self, collection_name, filename):
@@ -613,9 +624,9 @@ file is not saved. Please save first.")
 #   filename         - The output filename. If no extension is specified, the
 #                      default extension for the exporter (eg. '.fbx') is used.
 #                      If unspecified, the collection's name is used.
-#   prevent_export   - If set to True, the collection cannot be exported,
+#   exportable       - If set to False, the collection cannot be exported,
 #                      and it will not be included included when exporting
-#                      a parent collection.
+#                      a parent collection. If unspecified, defaults to True.
 #   join_meshes      - If set to True, all meshes in this collection will be
 #                      merged/joined into one during export. It even applies
 #                      when exported as a sub-collection of another export.
