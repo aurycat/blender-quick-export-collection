@@ -114,24 +114,6 @@ def get_properties_for_op(op):
 EXPORTER_PROPERTIES = { k:get_properties_for_op(v) for k,v in EXPORTERS.items() }
 
 
-def list_layercollections(lc, collection_to_export, output=None, within_collection_to_export=False):
-    """ I couldn't find any API like bpy.data.collections for LayerCollections,
-        so enumerate them manually. Also check which ones are children of the
-        collection to export. Don't include root LayerCollection because it behaves
-        weirdly in regard to the `exclude` property.
-    """
-    if output == None: # https://stackoverflow.com/q/1132941
-        output = []
-    if lc.collection == collection_to_export:
-        within_collection_to_export = True
-    for clc in lc.children:
-        if clc.collection == collection_to_export:
-            within_collection_to_export = True
-        output.append((clc, within_collection_to_export))
-        list_layercollections(clc, collection_to_export, output, within_collection_to_export)
-    return output
-
-
 def set_excluded_collections(
     lc,
     collection_names_not_exportable,
@@ -178,20 +160,26 @@ def set_excluded_collections(
     if lc.collection == collection_to_export: # Needed if collection_to_export is the root/scene collection
         within_collection_to_export = True
 
+    if DEBUG_PRINTS:
+        w_tick = "w" if within_collection_to_export else " "
+        i_tick = " " if lc.exclude else "i"
+        print(f"  [{w_tick}{i_tick}] {lc.name}")
+
     for clc in lc.children:
         if clc.collection == collection_to_export:
             clc.exclude = False
             set_excluded_collections(clc, collection_names_not_exportable, collection_to_export, True, False)
         elif within_collection_to_export:
-            if not within_nonexportable:
+            tmp_wne = within_nonexportable
+            if not tmp_wne:
                 if clc.name in collection_names_not_exportable:
-                    within_nonexportable = True
-            clc.exclude = within_nonexportable
-            set_excluded_collections(clc, collection_names_not_exportable, collection_to_export, True, within_nonexportable)
+                    tmp_wne = True
+            clc.exclude = tmp_wne
+            set_excluded_collections(clc, collection_names_not_exportable, collection_to_export, True, tmp_wne)
         else:
             clc.exclude = True
             set_excluded_collections(clc, collection_names_not_exportable, collection_to_export, False, False)
-
+    
 
 def find_topmost_collections(collection_names, collection):
     """ Given a starting collection and a list of collection names,
@@ -216,13 +204,43 @@ def find_topmost_collections(collection_names, collection):
     return list
 
 
-def select_included_objects_in_collection(view_layer, collection, mesh_only=False):
-    # Select set intersection between all the objects contained in
-    # the collection, and all the objects not excluded in the view layer.
+def save_global_properties(context, collection_to_export):
+    save = []
+
+    for o in collection_to_export.all_objects:
+        if o.hide_select or o.hide_viewport:
+            save.append((o, o.hide_select, o.hide_viewport))
+
+    # Ideally this would only check collections that actually contain objects
+    # within collection_to_exportmbut since there probably aren't many collections
+    # in a scene, it's easier/faster to just to include all the collections in
+    # the scene. Note just doing `collection_to_export.children_recursive` isn't
+    # sufficient because if collection_to_export is a child collection, the
+    # parent needs these properties changed too.
+    for c in context.scene.collection.children_recursive:
+        if c.hide_select or c.hide_viewport:
+            save.append((c, c.hide_select, c.hide_viewport))
+
+    return save
+
+
+def restore_global_properties(save):
+    for oc, hide_select, hide_viewport in save:
+        oc.hide_select = hide_select
+        oc.hide_viewport = hide_viewport
+
+
+def select_included_objects_in_collection(view_layer, collection, hidden_objects, mesh_only=False):
+    """ Select set intersection between all the objects contained in
+        the collection, and all the objects not excluded in the view layer.
+        Also, remove any objects recorded as invisible at the beginning of export
+    """
+
     bpy.ops.object.select_all(action = 'DESELECT')
-    objects_in_collection_to_export = collection.all_objects
-    unexcluded_objects = view_layer.objects
-    objects_to_export = set(objects_in_collection_to_export) & set(unexcluded_objects)
+
+    objects_to_export = set(collection.all_objects) & set(view_layer.objects)    
+    objects_to_export -= hidden_objects
+
     for o in objects_to_export:
         if not mesh_only or o.type == 'MESH':
             o.select_set(True)
@@ -288,22 +306,33 @@ you'll need to edit the code to account for it.")
         if 'use_active_collection' in EXPORTER_PROPERTIES[exporter_name]:
             settings['use_active_collection'] = False
         settings['use_selection'] = True
-        
-        # A snag in that plan is the 'hide_select' option of objects and collections
-        # which disables them being selected. We need to temporarily disable that property
-        # on not only every object we want to export, so we can select it, but also on
-        # every collection containing those objects, since 'hide_select' applies recursively.
-        #
-        # Ideally disable_hide_select would only include collections that actually contain
-        # objects we want to export, but since there probably aren't many collections in a
-        # scene, it's easier/faster to just to include all the collections in the scene.
-        disable_hide_select = [o for o in collection_to_export.all_objects if o.hide_select]
-        disable_hide_select.extend([c for c in context.scene.collection.children_recursive if c.hide_select])
 
+        # A snag in that plan is the 'hide_select' and 'hide_viewport' options of objects and
+        # collections which prevent them being selected. We need to temporarily disable those
+        # properties on not only every object we want to export, so we can select it, but also
+        # on every collection containing those objects, since they apply recursively.
+        # To make sure we can restore in case of Exceptions, only record the properties now
+        # and modify them later in the try/except block. 
+        saved_object_properties = save_global_properties(context, collection_to_export)
+
+        # 'use_visible' is difficult because other actions will modify the visiblity
+        # state, for example setting `exclude=False` to collections resets the contained
+        # objects' "temporary" hide_viewport setting.
+        hidden_objects = set()
+        if 'use_visible' in settings and settings['use_visible']:
+            del settings['use_visible']
+            for o in collection_to_export.all_objects:
+                if not o.visible_get():
+                    hidden_objects.add(o)
+
+        # Optimize the mesh joining process by only joining at the topmost collection nesting
+        # level necessary. I.e. meshes only need to get joined once, not multiple times from
+        # inner to outer.
         if len(collection_names_requesting_join) > 0:
             collections_to_join = find_topmost_collections(collection_names_requesting_join, collection_to_export)
         else:
             collections_to_join = []
+
         if len(collections_to_join) > 0:
             print("Joining meshes for collections:")
             for c in collections_to_join:
@@ -314,8 +343,12 @@ you'll need to edit the code to account for it.")
         # Create a new view layer so we can modify excluded collections and selected
         # objects and then easily restore those by just deleting the view layer and going
         # back to the previous one
+        # Use 'NEW' so that all viewlayer-local hide_viewport states are reset to True,
+        # which is important to be able to select objects for export (hidden objects
+        # can't be selected). Unfortunately this doesn't affect the global hide_viewport
+        # states, hence the 'saved_object_properties' thingy.
         saved_view_layer = context.view_layer
-        bpy.ops.scene.view_layer_add(type='COPY')
+        bpy.ops.scene.view_layer_add(type='NEW')
         new_view_layer = context.view_layer
 
         # Sanity check
@@ -324,28 +357,16 @@ you'll need to edit the code to account for it.")
 
         # Enter block which restores the previous view layer on exit
         try:
-
             if DEBUG_PRINTS:
                 print(f"[DEBUG] Marking excluded collections:")
-                # Due to the recursive effect of setting `exclude` described in `set_excluded_collections`,
-                # we need to store all the exclude values before modifying any to show the 
-                # before/after correctly. Can't just print each out as they're changed.
-                layercollections = list_layercollections(bpy.context.view_layer.layer_collection, collection_to_export)
-                prev_excludes = [lc.exclude for lc, _ in layercollections]
 
             set_excluded_collections(new_view_layer.layer_collection, collection_names_not_exportable, collection_to_export)
 
-            if DEBUG_PRINTS:
-                for i, (lc, within_collection_to_export) in enumerate(layercollections):
-                    w_tick = "w" if within_collection_to_export else " "
-                    pe_tick = " " if prev_excludes[i] else "I" # I for included
-                    ne_tick = " " if lc.exclude else "I"
-                    print(f"  [{w_tick}{pe_tick}{ne_tick}] {lc.name}")
-
-            # Enter block which restores the previous hide_select state on exit
+            # Enter block which restores the previous hide_select/hide_viewport state on exit
             try:
-                for oc in disable_hide_select:
+                for oc,_,_ in saved_object_properties:
                     oc.hide_select = False
+                    oc.hide_viewport = False
 
                 if DEBUG_PRINTS:
                     print(f"[DEBUG] Objects in '{collection_to_export.name}':")
@@ -355,8 +376,10 @@ you'll need to edit the code to account for it.")
                     collection_object_names = collection_to_export.all_objects.keys()
                     for on in collection_object_names:
                         in_viewlayer = on in viewlayer_object_names
-                        tick = "v" if in_viewlayer else " "
-                        print(f"  [{tick}] {on}")
+                        is_hidden = bpy.data.objects[on] in hidden_objects
+                        v_tick = "v" if in_viewlayer else " "
+                        h_tick = "h" if is_hidden else " "
+                        print(f"  [{v_tick}{h_tick}] {on}")
 
                 joined_meshes = []
                 duplicated_meshes = []
@@ -365,8 +388,8 @@ you'll need to edit the code to account for it.")
                 try:
                     # Create joined versions of meshes in collections that were requested to be joined
                     for c in collections_to_join:
-                        select_included_objects_in_collection(new_view_layer, c, mesh_only=True)
-                        if len(context.selected_objects) > 1:
+                        select_included_objects_in_collection(new_view_layer, c, hidden_objects, mesh_only=True)
+                        if len(context.selected_objects) > 0:
                             if bpy.ops.object.duplicate(linked=False) != {'FINISHED'}:
                                 raise RuntimeError(f"Failed to duplicate meshes (as part of making a joined mesh) in collection {c.name}. Selected objects are: {repr(context.selected_objects)}")
                             duplicated_meshes = context.selected_objects.copy()
@@ -375,8 +398,9 @@ you'll need to edit the code to account for it.")
                             # objects otherwise join() is unhappy
                             context.view_layer.objects.active = context.selected_objects[0]
 
-                            if bpy.ops.object.join() != {'FINISHED'}:
-                                raise RuntimeError(f"Failed to join meshes in collection {c.name}. Selected objects are: {repr(context.selected_objects)}")
+                            if len(context.selected_objects) > 1:
+                                if bpy.ops.object.join() != {'FINISHED'}:
+                                    raise RuntimeError(f"Failed to join meshes in collection {c.name}. Selected objects are: {repr(context.selected_objects)}")
 
                             if len(context.selected_objects) != 1:
                                 abort_postjoin_meshes = context.selected_objects.copy()
@@ -399,19 +423,18 @@ you'll need to edit the code to account for it.")
                         joined_mesh_names = [o.name for o in joined_meshes]
                         for on in collection_object_names:
                             in_viewlayer = on in viewlayer_object_names
+                            is_hidden = bpy.data.objects[on] in hidden_objects
                             is_joined_mesh = on in joined_mesh_names
                             v_tick = "v" if in_viewlayer else " "
+                            h_tick = "h" if is_hidden else " "
                             j_tick = "j" if is_joined_mesh else " "
-                            print(f"  [{v_tick}{j_tick}] {on}")
-
-#                    if len(collections_to_join) != len(joined_meshes):
-#                        raise RuntimeError(f"Something went wrong when joining meshes! Expected to get {len(collections_to_join)} joined meshes, but {len(joined_meshes)} were made.")
+                            print(f"  [{v_tick}{h_tick}{j_tick}] {on}")
 
                     # Select all objects to export.
                     # If joined meshes are involved, this first selection will include both
                     # the original separate meshes *and* the joined meshes! That will be
                     # resolved in the next step
-                    select_included_objects_in_collection(new_view_layer, collection_to_export)
+                    select_included_objects_in_collection(new_view_layer, collection_to_export, hidden_objects)
 
                     if DEBUG_PRINTS and len(collections_to_join) > 0:
                         print("[DEBUG] Objects selected for export (before filtering joined meshes):")
@@ -434,10 +457,7 @@ you'll need to edit the code to account for it.")
                         o.select_set(True)
 
                     if DEBUG_PRINTS:
-                        if len(collections_to_join) > 0:
-                            print("[DEBUG] Objects selected for export (final):")
-                        else:
-                            print("[DEBUG] Objects selected for export:")
+                        print("[DEBUG] Final objects selected for export:")
                         for o in context.selected_objects:
                             print(f"  {o.name}")
 
@@ -467,18 +487,16 @@ you'll need to edit the code to account for it.")
                         try: bpy.data.objects.remove(m)
                         except: pass
             finally:
-                # Restore objects/collections with disabled hide_select
-                for oc in disable_hide_select:
-                    try: oc.hide_select = True
-                    except: pass
+                restore_global_properties(saved_object_properties)
         finally:
             pass
-#            # Restore previous view layer, which restores selection and excluded collections
-#            context.window.view_layer = saved_view_layer
-#            # Delete temporary view layer
-#            context.scene.view_layers.remove(new_view_layer)
+            # Restore previous view layer, which restores selection and excluded collections
+            context.window.view_layer = saved_view_layer
+            # Delete temporary view layer
+            context.scene.view_layers.remove(new_view_layer)
 
         return result
+
 
     def get_export_settings(self, context, collection_name):
         """ Get all the info from the config file necessary to export a particular collection.
@@ -622,6 +640,9 @@ file is not saved. Please save first.")
 #   joined_mesh_name - When join_meshes is True, this specifies the name of
 #                      the combined mesh in the export. If not specified, the
 #                      name of the collection is used.
+#   use_visible      - If True, only export visible objects. Unlike join_meshes,
+#                      this applies to the whole export, not just the collections
+#                      it's specified on. If not specified, defaults to False.
 # Additionally, any options supported by the exporter can be specified.
 # For example, the fbx exporter supports the options 'object_types',
 # 'use_triangles', 'embed_textures', and more."
