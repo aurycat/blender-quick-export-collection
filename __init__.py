@@ -97,7 +97,7 @@ class QXC_OT_unregister(Operator):
 
 def qxc_draw_menu(self, context):
     layout = self.layout
-    
+
     layout.operator(QXC_OT_export.bl_idname)
     #layout.operator(QXC_OT_unregister.bl_idname)
     layout.separator()
@@ -122,7 +122,7 @@ def set_excluded_collections(
     within_nonexportable=False):
     """ A LayerCollection is a wrapper around a Collection with extra info specific to the
         view layer. In particular, it holds the `exclude` property (seen as the checkbox
-        next to collections in the Outliner), which determines whether objects in the 
+        next to collections in the Outliner), which determines whether objects in the
         collection can be selected and whether objects appear in `viewlayer.objects`.
 
         For collections outside of the collection_to_export (CTE), their exclude state
@@ -179,7 +179,7 @@ def set_excluded_collections(
         else:
             clc.exclude = True
             set_excluded_collections(clc, collection_names_not_exportable, collection_to_export, False, False)
-    
+
 
 def find_topmost_collections(collection_names, collection):
     """ Given a starting collection and a list of collection names,
@@ -238,7 +238,7 @@ def select_included_objects_in_collection(view_layer, collection, hidden_objects
 
     bpy.ops.object.select_all(action = 'DESELECT')
 
-    objects_to_export = set(collection.all_objects) & set(view_layer.objects)    
+    objects_to_export = set(collection.all_objects) & set(view_layer.objects)
     objects_to_export -= hidden_objects
 
     for o in objects_to_export:
@@ -266,7 +266,7 @@ class QXC_OT_export(Operator):
             raise RuntimeError(f"Target object is not a collection: {target_obj}")
 
         collection_to_export = target_obj
-        
+
         print(f"=== Exporting collection '{collection_to_export.name}' ===")
 
         s = self.get_export_settings(context, collection_to_export.name)
@@ -312,7 +312,7 @@ you'll need to edit the code to account for it.")
         # properties on not only every object we want to export, so we can select it, but also
         # on every collection containing those objects, since they apply recursively.
         # To make sure we can restore in case of Exceptions, only record the properties now
-        # and modify them later in the try/except block. 
+        # and modify them later in the try/except block.
         saved_object_properties = save_global_properties(context, collection_to_export)
 
         # 'use_visible' is difficult because other actions will modify the visiblity
@@ -393,7 +393,7 @@ you'll need to edit the code to account for it.")
                             if bpy.ops.object.duplicate(linked=False) != {'FINISHED'}:
                                 raise RuntimeError(f"Failed to duplicate meshes (as part of making a joined mesh) in collection {c.name}. Selected objects are: {repr(context.selected_objects)}")
                             duplicated_meshes = context.selected_objects.copy()
-        
+
                             # Make sure the active object is among the selected
                             # objects otherwise join() is unhappy
                             context.view_layer.objects.active = context.selected_objects[0]
@@ -451,7 +451,7 @@ you'll need to edit the code to account for it.")
                         print("[DEBUG] Objects selected for export (filter step 1):")
                         for o in context.selected_objects:
                             print(f"  {o.name}")
-                    
+
                     # And now re-select only the joined meshes
                     for o in joined_meshes:
                         o.select_set(True)
@@ -465,7 +465,7 @@ you'll need to edit the code to account for it.")
 
                     # At last! Do the actual export! Woooo
                     result = export_func(**settings)
-                    
+
                     if result == {'FINISHED'}:
                         msg = f"Successfully exported {collection_to_export.name} to {settings['filepath']}"
                         if is_empty:
