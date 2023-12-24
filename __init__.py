@@ -114,13 +114,6 @@ def get_properties_for_op(op):
 EXPORTER_PROPERTIES = { k:get_properties_for_op(v) for k,v in EXPORTERS.items() }
 
 
-#def map_layercollections(lc, _internal_output={}):
-#    _internal_output[lc.name] = lc
-#    for clc in lc.children:
-#        enumerate_layercollections(clc, _internal_output)
-#    return _internal_output
-
-
 def list_layercollections(lc, collection_to_export, output=None, within_collection_to_export=False):
     """ I couldn't find any API like bpy.data.collections for LayerCollections,
         so enumerate them manually. Also check which ones are children of the
