@@ -132,52 +132,72 @@ def list_layercollections(lc, collection_to_export, output=None, within_collecti
     if lc.collection == collection_to_export:
         within_collection_to_export = True
     for clc in lc.children:
+        if clc.collection == collection_to_export:
+            within_collection_to_export = True
         output.append((clc, within_collection_to_export))
         list_layercollections(clc, collection_to_export, output, within_collection_to_export)
     return output
 
 
-#def set_excluded_collections(collection_names_not_exportable, collection_to_export, current_layercollection, within_collection_to_export=False, top=True):
-#    """ The config file can mark collections as not allowed to be exported. This is useful
-#        for utility collections which contain stuff that only needs to be in Blender.
-#        Based on that list of unallowed collections, this function marks all collections
-#        as 'excluded' or not exluded. To see how it works, consider this scene:
+def set_excluded_collections(
+    lc,
+    collection_names_not_exportable,
+    collection_to_export,
+    within_collection_to_export=False,
+    within_nonexportable=False):
+    """ A LayerCollection is a wrapper around a Collection with extra info specific to the
+        view layer. In particular, it holds the `exclude` property (seen as the checkbox
+        next to collections in the Outliner), which determines whether objects in the 
+        collection can be selected and whether objects appear in `viewlayer.objects`.
 
-#          Collection A
-#           - Object 1
-#           - Collection B
-#              - Object 2
-#              - Collection C
-#                 - Object 3
+        For collections outside of the collection_to_export (CTE), their exclude state
+        doesn't really matter, since only objects in the CTE are selected for export.
+        Since a child collection can be non-excluded (exclude=False) even if its parent
+        is excluded, just set collections outside CTE to exclude=True for cleanliness.
 
-#        If A is being exported, and only B is not allowed to be exported, then only object 1 gets exported.
-#        If B is being exported, and only C is not allowed to be exported, then only object 2 gets exported.
-#        If B is being exported, and only A (!!) is not allowed to be exported, then objects 2 and 3 get
-#          exported (even though A, containing B, is not allowed to be exported).
-#        If C is being exported, object 3 always gets exported, regardless of whether A or B are allowed.
-#        Of course, no collection can directly be exported if it is not allowed.
+        The CTE should be set exclude=False, of course. And for collections inside the
+        CTE, set exclude=False, unless they've been marked non-exportable in the config
+        file.
 
-#        This behavior is sort-of the intuitive behavior you'd want when you right-click a collection
-#        and select 'Export': child collections don't get exported if they're not allowed to be, but
-#        it doesn't matter whether a parent collection is or isnt allowed to be exported.
+        Surprising behaviour of `exclude` property:
+          Modifying `exclude` property has a bit of unexpected behavior. Setting exclude=True
+          will set all child collections, recursively, to exclude=True too. In addition,
+          their previous exclude value will be saved internally (not accessible to Python).
+          Setting exclude=False will restore all child collections, recursively to their
+          saved value. These recursive actions happen even if the assignment doesn't change
+          the value (e.g. setting exclude=True when `exclude` is already True).
 
-#        To achieve this,
-#          1. All collections outside `collection_to_export` are marked exclude=False.
-#          2. `collection_to_export` is also marked exclude=False.
-#          3. Collections inside `collection_to_export` are marked exclude=True if they are in the
-#             not-allowed list, otherwise marked exclude=False.
-#    """
+          Setting `exclude` on the root / scene LayerCollection to either value will not
+          change the root, but it will have the effect of setting exclude=False, i.e. it
+          will recursively restore all child collection `exclude` to their last saved value.
+          That's kinda weird, and since the root can't be excluded anyway, avoid changing it.
 
-#    if current_layercollection.collection == collection_to_export:
-#        within_collection_to_export = True
-#        current_layercollection.exclude = False
+          This function could rely on these recurisve behaviors to make it a little more
+          effecient, but they seem like implementation details that could change. So I'm
+          preferring to just always set every collection, in outer-to-inner order, to
+          pretend like the recurisve behavior doesn't exist.
 
-#    for c in current_layercollection.children:
-#        if within_collection_to_export:
-#            c.exclude = (c.name in collection_names_not_exportable)
-#        else:
-#            c.exclude = True
-#        set_excluded_collections(collection_names_not_exportable, collection_to_export, c, within_collection_to_export, top=False)
+          The only "implementation detail" I'm relying on here is that a child collection
+          can be exclude=False when the parent is exclude=True, which seems safe enough;
+          it's been that way since Collections were introduced in 2.80
+    """
+
+    if lc.collection == collection_to_export: # Needed if collection_to_export is the root/scene collection
+        within_collection_to_export = True
+
+    for clc in lc.children:
+        if clc.collection == collection_to_export:
+            clc.exclude = False
+            set_excluded_collections(clc, collection_names_not_exportable, collection_to_export, True, False)
+        elif within_collection_to_export:
+            if not within_nonexportable:
+                if clc.name in collection_names_not_exportable:
+                    within_nonexportable = True
+            clc.exclude = within_nonexportable
+            set_excluded_collections(clc, collection_names_not_exportable, collection_to_export, True, within_nonexportable)
+        else:
+            clc.exclude = True
+            set_excluded_collections(clc, collection_names_not_exportable, collection_to_export, False, False)
 
 
 def find_topmost_collections(collection_names, collection):
@@ -311,47 +331,23 @@ you'll need to edit the code to account for it.")
 
         # Enter block which restores the previous view layer on exit
         try:
-            # A LayerCollection is a wrapper around a Collection with extra info specific to the
-            # view layer. In particular, it holds the `exclude` property (seen as the checkbox
-            # next to collections in the Outliner), which determines whether objects in the 
-            # collection can be selected and whether objects appear in `viewlayer.objects`.
-            layercollections = list_layercollections(bpy.context.view_layer.layer_collection, collection_to_export)
 
             if DEBUG_PRINTS:
                 print(f"[DEBUG] Marking excluded collections:")
-                # Due to recursive effect noted below, need to store all the exclude values
-                # before modifying in order for the before/after debug print to be correct
+                # Due to the recursive effect of setting `exclude` described in `set_excluded_collections`,
+                # we need to store all the exclude values before modifying any to show the 
+                # before/after correctly. Can't just print each out as they're changed.
+                layercollections = list_layercollections(bpy.context.view_layer.layer_collection, collection_to_export)
                 prev_excludes = [lc.exclude for lc, _ in layercollections]
 
-            # For LayerCollections outside the collection to export (CTE), mark them *not*
-            # excluded. Because if the CTE is a child collection, we don't want the outer
-            # collection to be excluded otherwise nothing in our CTE will be selectable.
-            #
-            # Otherwise, within the CTE, exclude them based on whether it is marked in the
-            # config file as not allowed to be exported. That will prevent objects within
-            # from being selected for export during the next steps.
-            #
-            # Also notable: modifying `exclude` recursively affects child LayerCollections.
-            #  - Changing to True will recursively exclude all child LayerCollections and
-            #    internally (unreachable by Python) remember their previous excluded state.
-            #  - Changing to False will recursively restore all child LayerCollections
-            #    to their saved state.
-            # This is a little annoying, but we can avoid any issues by making sure to
-            # always set `exclude` starting from the outermost collections, going inwards.
-            for lc, within_collection_to_export in layercollections:
-                if within_collection_to_export:
-                    lc.exclude = (lc.name in collection_names_not_exportable)
-                else:
-                    lc.exclude = False # Yes, False! See comment above.
+            set_excluded_collections(new_view_layer.layer_collection, collection_names_not_exportable, collection_to_export)
 
             if DEBUG_PRINTS:
                 for i, (lc, within_collection_to_export) in enumerate(layercollections):
                     w_tick = "w" if within_collection_to_export else " "
-                    pe_tick = "e" if prev_excludes[i] else "I"
-                    ne_tick = "e" if lc.exclude else "I"
+                    pe_tick = " " if prev_excludes[i] else "I" # I for included
+                    ne_tick = " " if lc.exclude else "I"
                     print(f"  [{w_tick}{pe_tick}{ne_tick}] {lc.name}")
-
-            return result
 
             # Enter block which restores the previous hide_select state on exit
             try:
