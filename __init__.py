@@ -408,6 +408,7 @@ you'll need to edit the code to account for it.")
                 joined_meshes = []
                 duplicated_meshes = []
                 abort_postjoin_meshes = []
+                renamed_objects = []
                 # Enter block which removes duplicated or joined meshes on exit
                 try:
                     # Create joined versions of meshes in collections that were requested to be joined
@@ -450,7 +451,13 @@ you'll need to edit the code to account for it.")
                                 raise RuntimeError(f"After join, more than one object is selected! When joining meshes in collection {c.name}. Selected objects are: {repr(context.selected_objects)}")
 
                             new_joined_mesh = context.selected_objects[0]
-                            new_joined_mesh.name = collection_joined_mesh_names[c.name]
+                            desired_name = collection_joined_mesh_names[c.name]
+                            # If some other object already exists with this name, temporarily rename it
+                            if desired_name in bpy.data.objects:
+                                existing_obj = bpy.data.objects[desired_name]
+                                renamed_objects.append((existing_obj, existing_obj.name))
+                                existing_obj.name += ".QXC_temp_renamed"
+                            new_joined_mesh.name = desired_name
                             new_joined_mesh.data.name = new_joined_mesh.name
 
                             if new_joined_mesh in joined_meshes:
@@ -529,6 +536,8 @@ you'll need to edit the code to account for it.")
                     for m in abort_postjoin_meshes:
                         try: bpy.data.objects.remove(m)
                         except: pass
+                    for o, prev_name in renamed_objects:
+                        o.name = prev_name
             finally:
                 restore_global_properties(saved_object_properties)
         finally:
