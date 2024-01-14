@@ -230,6 +230,14 @@ def restore_global_properties(save):
         oc.hide_viewport = hide_viewport
 
 
+def select_objects(objects, mesh_only=False, replace=True):
+    if replace:
+        bpy.ops.object.select_all(action = 'DESELECT')
+    for o in objects:
+        if not mesh_only or o.type == 'MESH':
+            o.select_set(True)
+
+
 def select_included_objects_in_collection(view_layer, collection, hidden_objects, mesh_only=False):
     """ Select set intersection between all the objects contained in
         the collection, and all the objects not excluded in the view layer.
@@ -241,9 +249,25 @@ def select_included_objects_in_collection(view_layer, collection, hidden_objects
     objects_to_export = set(collection.all_objects) & set(view_layer.objects)
     objects_to_export -= hidden_objects
 
-    for o in objects_to_export:
-        if not mesh_only or o.type == 'MESH':
-            o.select_set(True)
+    select_objects(objects_to_export, mesh_only=mesh_only)
+
+
+def apply_modifiers_on_objects(objects, context=bpy.context):
+    prev_selected = context.selected_objects.copy()
+    prev_active = context.view_layer.objects.active
+    bpy.ops.object.select_all(action = 'DESELECT')
+    for o in objects:
+        o.select_set(True)
+        context.view_layer.objects.active = o
+        # Note this will iterate over armatures in the top-to-bottom order shown in the UI
+        for mod in o.modifiers:
+            print(mod.name)
+            if mod.type != 'ARMATURE':
+                bpy.ops.object.modifier_set_active(modifier=mod.name)
+                bpy.ops.object.modifier_apply(modifier=mod.name)
+        o.select_set(False)
+    select_objects(prev_selected)
+    context.view_layer.objects.active = prev_active
 
 
 class QXC_OT_export(Operator):
@@ -394,9 +418,28 @@ you'll need to edit the code to account for it.")
                                 raise RuntimeError(f"Failed to duplicate meshes (as part of making a joined mesh) in collection {c.name}. Selected objects are: {repr(context.selected_objects)}")
                             duplicated_meshes = context.selected_objects.copy()
 
+                            apply_modifiers_on_objects(duplicated_meshes, context)
+
                             # Make sure the active object is among the selected
-                            # objects otherwise join() is unhappy
-                            context.view_layer.objects.active = context.selected_objects[0]
+                            # objects otherwise join() is unhappy.
+                            #
+                            # Try to smartly pick an active object -- if there's
+                            # an object named the same as the joined mesh name,
+                            # use that. Otherwise, if there's an object named the
+                            # same as the collection, use that. Otherwise, just
+                            # pick the first from the selected object list.
+                            active_object_candidate = None
+                            for obj in context.selected_objects:
+                                if obj.name == collection_joined_mesh_names[c.name]:
+                                    active_object_candidate = obj
+                                    break
+                                elif obj.name == c.name:
+                                    active_object_candidate = obj
+                            if active_object_candidate != None:
+                                context.view_layer.objects.active = active_object_candidate
+                            else:
+                                context.view_layer.objects.active = context.selected_objects[0]
+
 
                             if len(context.selected_objects) > 1:
                                 if bpy.ops.object.join() != {'FINISHED'}:
@@ -634,9 +677,11 @@ file is not saved. Please save first.")
 #   exportable       - If set to False, the collection cannot be exported,
 #                      and it will not be included included when exporting
 #                      a parent collection. If unspecified, defaults to True.
-#   join_meshes      - If set to True, all meshes in this collection will be
-#                      merged/joined into one during export. It even applies
-#                      when exported as a sub-collection of another export.
+#   join_meshes      - If set to True, all meshes that would be exported in
+#                      this collection will be merged/joined into one during
+#                      export. It even applies when exported as a sub-collection
+#                      of another export. Modifiers will be applied before
+#                      joining, except Armature modifiers.
 #   joined_mesh_name - When join_meshes is True, this specifies the name of
 #                      the combined mesh in the export. If not specified, the
 #                      name of the collection is used.
