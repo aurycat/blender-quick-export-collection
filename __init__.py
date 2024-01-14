@@ -533,7 +533,7 @@ you'll need to edit the code to account for it.")
         if not col_config.getboolean('exportable', fallback=True):
             self.report({'ERROR'},
 f"'{collection_name}' is marked unexportable in config. (The config \
-file {CONFIG_FILE_NAME} can be found in the Text Edtior window.)")
+file {CONFIG_FILE_NAME} can be found in the Text Editor window.)")
             return None
 
         exporter_name = col_config.get('exporter', fallback="fbx")
@@ -542,7 +542,7 @@ file {CONFIG_FILE_NAME} can be found in the Text Edtior window.)")
             self.report({'ERROR'},
 f"Unknown/unsupported exporter '{exporter_name}' for collection '{collection_name}'. \
 Please adjust it in the config file {CONFIG_FILE_NAME}, which is found in the \
-Text Edtior window.")
+Text Editor window.")
             return None
 
         export_filename = col_config.get('filename', fallback=f"{collection_name}.{exporter_name}")
@@ -564,7 +564,7 @@ to the blend file is with \"//\". Using that instead.")
             self.make_new_config_file(collection_name, export_filename)
             self.report({'ERROR'},
 f"[FIRST EXPORT NOTICE!] No config file was present, so one has been created \
-automatically. Go to the Text Edtior window and open {CONFIG_FILE_NAME} \
+automatically. Go to the Text Editor window and open {CONFIG_FILE_NAME} \
 to review it, make changes as necessary, then try exporting again.")
             return None
         elif append_section:
@@ -572,7 +572,7 @@ to review it, make changes as necessary, then try exporting again.")
             self.report({'ERROR'},
 f"[FIRST EXPORT NOTICE!] This collection is not listed in the exporter config \
 file. A new section for '{collection_name}' has been created automatically. \
-Go to the Text Edtior window and open {CONFIG_FILE_NAME} to review it, make \
+Go to the Text Editor window and open {CONFIG_FILE_NAME} to review it, make \
 changes as necessary, then try exporting again.")
             return None
 
